@@ -18,13 +18,45 @@
 
 #pragma once
 
-#include <vector> 
+#include <vector>
 #include "BluetoothA2DPCommon.h"
 
-typedef void (* bt_app_cb_t) (uint16_t event, void *param);
-typedef  int32_t (* music_data_cb_t) (uint8_t *data, int32_t len);
-typedef  int32_t (* music_data_channels_cb_t) (Frame *data, int32_t len);
-typedef void (* bt_app_copy_cb_t) (app_msg_t *msg, void *p_dest, void *p_src);
+
+#define SPP_TAG "SPP_INITIATOR_DEMO"
+#define EXAMPLE_DEVICE_NAME "ATOM SPP Master"
+
+#define SPP_SHOW_DATA 0
+#define SPP_SHOW_SPEED 1
+#define SPP_SHOW_MODE SPP_SHOW_SPEED /*Choose show mode: show data or speed*/
+
+static const esp_spp_mode_t esp_spp_mode = ESP_SPP_MODE_CB;
+
+static struct timeval time_new, time_old;
+static long data_num = 0;
+
+static const esp_spp_sec_t sec_mask = ESP_SPP_SEC_AUTHENTICATE;
+static const esp_spp_role_t role_master = ESP_SPP_ROLE_MASTER;
+
+esp_bd_addr_t peer_bd_addr = {0};
+static uint8_t peer_bdname_len;
+static char peer_bdname[ESP_BT_GAP_MAX_BDNAME_LEN + 1];
+static const char remote_device_name[] = "ATOM View";//接続先のBluetoothデバイス名
+static const esp_bt_inq_mode_t inq_mode = ESP_BT_INQ_MODE_GENERAL_INQUIRY;
+static const uint8_t inq_len = 30;
+static const uint8_t inq_num_rsps = 0;
+
+#if (SPP_SHOW_MODE == SPP_SHOW_DATA)
+#define SPP_DATA_LEN 20
+#else
+#define SPP_DATA_LEN ESP_SPP_MAX_MTU
+#endif
+static uint8_t spp_data[SPP_DATA_LEN];
+static uint8_t *s_p_data = NULL; /* data pointer of spp_data */
+
+typedef void (*bt_app_cb_t)(uint16_t event, void *param);
+typedef int32_t (*music_data_cb_t)(uint8_t *data, int32_t len);
+typedef int32_t (*music_data_channels_cb_t)(Frame *data, int32_t len);
+typedef void (*bt_app_copy_cb_t)(app_msg_t *msg, void *p_dest, void *p_src);
 
 extern "C" void ccall_bt_av_hdl_stack_evt(uint16_t event, void *p_param);
 extern "C" void ccall_bt_app_task_handler(void *arg);
@@ -38,6 +70,8 @@ extern "C" int32_t ccall_bt_app_a2d_data_cb(uint8_t *data, int32_t len);
 extern "C" int32_t ccall_get_channel_data_wrapper(uint8_t *data, int32_t len) ;
 extern "C" int32_t ccall_get_data_default(uint8_t *data, int32_t len) ;
 
+// Serial Port Profile
+extern "C" void ccall_bt_spp_cb(esp_spp_cb_event_t event, esp_spp_cb_param_t *param);
 
 /**
  * @brief A2DP Bluetooth Source
@@ -59,14 +93,14 @@ class BluetoothA2DPSource : public BluetoothA2DPCommon {
   friend int32_t ccall_get_data_default(uint8_t *data, int32_t len) ;
 
 
-  public: 
+  public:
     /// Constructor
     BluetoothA2DPSource();
 
     /// Destructor
     ~BluetoothA2DPSource();
 
-    /// activate Secure Simple Pairing 
+    /// activate Secure Simple Pairing
     virtual void set_ssp_enabled(bool active){
       this->ssp_enabled = active;
     }
@@ -91,7 +125,7 @@ class BluetoothA2DPSource : public BluetoothA2DPCommon {
      * @brief starts the bluetooth source
      * @param name: Bluetooth name of the device to connect to
      * @param callback: function that provides the audio stream as array of Frame
-     * @param is_ssp_enabled: Flag to activate Secure Simple Pairing 
+     * @param is_ssp_enabled: Flag to activate Secure Simple Pairing
      */
     virtual void start(const char* name, music_data_channels_cb_t callback = NULL);
 
@@ -99,14 +133,14 @@ class BluetoothA2DPSource : public BluetoothA2DPCommon {
     virtual void start(std::vector<const char*> names, music_data_channels_cb_t callback = NULL);
 
     /**
-     * @brief starts the bluetooth source 
-     * 
+     * @brief starts the bluetooth source
+     *
      * @param name: Bluetooth name of the device to connect to
      * @param callback: function that provides the audio stream -
      * The supported audio codec in ESP32 A2DP is SBC. SBC audio stream is encoded
      * from PCM data normally formatted as 44.1kHz sampling rate, two-channel 16-bit sample data
-     *  @param is_ssp_enabled: Flag to activate Secure Simple Pairing 
-     */ 
+     *  @param is_ssp_enabled: Flag to activate Secure Simple Pairing
+     */
     virtual void start_raw(const char* name, music_data_cb_t callback = NULL);
 
     /// start_raw which supports multiple alternative names
@@ -226,6 +260,8 @@ class BluetoothA2DPSource : public BluetoothA2DPCommon {
     virtual void bt_av_hdl_avrc_ct_evt(uint16_t event, void *p_param);
     /// resets the last connectioin so that we can reconnect
     virtual void reset_last_connection();
+    /// for Serial Port Profile
+    virtual void bt_spp_cb(esp_spp_cb_event_t event, esp_spp_cb_param_t *param);
 
 #ifdef ESP_IDF_4
     void bt_av_notify_evt_handler(uint8_t event, esp_avrc_rn_param_t *param);

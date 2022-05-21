@@ -71,7 +71,7 @@ extern "C" void ccall_a2d_app_heart_beat(void *arg) {
 extern "C" void ccall_bt_app_a2d_cb(esp_a2d_cb_event_t event, esp_a2d_cb_param_t *param){
     if (self_BluetoothA2DPSource) self_BluetoothA2DPSource->bt_app_a2d_cb(event, param);
 }
-    
+
 extern "C" void ccall_bt_app_av_sm_hdlr(uint16_t event, void *param){
     if (self_BluetoothA2DPSource) self_BluetoothA2DPSource->bt_app_av_sm_hdlr(event, param);
 }
@@ -99,20 +99,23 @@ extern "C" int32_t ccall_get_channel_data_wrapper(uint8_t *data, int32_t len) {
         return 0;
     }
     memset(data,0,len);
-    return (*(self_BluetoothA2DPSource->data_stream_channels_callback))((Frame*)data, len / 4) * 4 ;    
+    return (*(self_BluetoothA2DPSource->data_stream_channels_callback))((Frame*)data, len / 4) * 4 ;
 }
 
 extern "C" int32_t ccall_get_data_default(uint8_t *data, int32_t len) {
-    return self_BluetoothA2DPSource->get_data_default(data, len);   
+    return self_BluetoothA2DPSource->get_data_default(data, len);
 }
 
+extern "C" void ccall_bt_spp_cb(esp_spp_cb_event_t event, esp_spp_cb_param_t *param){
+    if (self_BluetoothA2DPSource) self_BluetoothA2DPSource->bt_spp_cb(event, param);
+}
 
 BluetoothA2DPSource::BluetoothA2DPSource() {
     ESP_LOGD(BT_APP_TAG, "%s, ", __func__);
     self_BluetoothA2DPSource = this;
     this->ssp_enabled = false;
     this->pin_type = ESP_BT_PIN_TYPE_VARIABLE;
-    
+
     // default pin code
     strcpy((char*)pin_code, "1234");
     pin_code_len = 4;
@@ -124,7 +127,7 @@ BluetoothA2DPSource::BluetoothA2DPSource() {
     s_intv_cnt = 0;
     s_connecting_intv = 0;
     s_pkt_cnt = 0;
-    
+
     s_bt_app_task_queue = NULL;
     s_bt_app_task_handle = NULL;
 
@@ -209,6 +212,19 @@ void BluetoothA2DPSource::start_raw(std::vector<const char*> names, music_data_c
             ESP_LOGE(BT_AV_TAG, "%s enable bluedroid failed\n", __func__);
             return;
         }
+    }
+
+    if ((ret = esp_spp_register_callback(&ccall_bt_spp_cb)) != ESP_OK)
+    {
+        ESP_LOGE(SPP_TAG, "%s spp register failed: %s\n", __func__, esp_err_to_name(ret));
+        return;
+    }
+
+    // Serial Port Profile init
+    if ((ret = esp_spp_init(esp_spp_mode)) != ESP_OK)
+    {
+        ESP_LOGE(SPP_TAG, "%s spp init failed: %s\n", __func__, esp_err_to_name(ret));
+        return;
     }
 
     /* create application task */
@@ -306,7 +322,7 @@ void BluetoothA2DPSource::bt_app_task_handler(void *arg)
                     default:
                         ESP_LOGW(BT_APP_TAG, "%s, unhandled sig: %d", __func__, msg.sig);
                         break;
-                } 
+                }
 
                 if (msg.param) {
                     free(msg.param);
@@ -377,7 +393,7 @@ void BluetoothA2DPSource::filter_inquiry_scan_result(esp_bt_gap_cb_param_t *para
     int32_t rssi = -129; /* invalid value */
     uint8_t *eir = NULL;
     esp_bt_gap_dev_prop_t *p;
-	
+
 	ESP_LOGI(BT_AV_TAG, "Scanned device: %s", to_str(param->disc_res.bda));
     for (int i = 0; i < param->disc_res.num_prop; i++) {
         p = param->disc_res.prop + i;
@@ -441,19 +457,43 @@ void BluetoothA2DPSource::filter_inquiry_scan_result(esp_bt_gap_cb_param_t *para
 	else{
 		ESP_LOGI(BT_AV_TAG, "--Compatiblity: Scanned Device not Compatible.");
 	}
-	
-	
+
+
 }
 
-
+//OK add SPP code
 void BluetoothA2DPSource::bt_app_gap_callback(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_param_t *param)
 {
     switch (event) {
         case ESP_BT_GAP_DISC_RES_EVT: {
+            ESP_LOGI(SPP_TAG, "ESP_BT_GAP_DISC_RES_EVT");
+            //for a2dp
             filter_inquiry_scan_result(param);
+
+            //for spp
+            esp_log_buffer_hex(SPP_TAG, param->disc_res.bda, ESP_BD_ADDR_LEN);
+            /* Find the target peer device name in the EIR data */
+            for (int i = 0; i < param->disc_res.num_prop; i++)
+            {
+                if (param->disc_res.prop[i].type == ESP_BT_GAP_DEV_PROP_EIR && get_name_from_eir(param->disc_res.prop[i].val, peer_bdname, &peer_bdname_len))
+                {
+                    esp_log_buffer_char(SPP_TAG, peer_bdname, peer_bdname_len);
+                    if (strlen(remote_device_name) == peer_bdname_len && strncmp(peer_bdname, remote_device_name, peer_bdname_len) == 0)
+                    {
+                        memcpy(peer_bd_addr, param->disc_res.bda, ESP_BD_ADDR_LEN);
+                        /* Have found the target peer device, cancel the previous GAP discover procedure. And go on
+                         * discovering the SPP service on the peer device */
+                        esp_bt_gap_cancel_discovery();
+                        esp_spp_start_discovery(peer_bd_addr);
+                    }
+                }
+            }
+
             break;
         }
         case ESP_BT_GAP_DISC_STATE_CHANGED_EVT: {
+            ESP_LOGI(SPP_TAG, "ESP_BT_GAP_DISC_STATE_CHANGED_EVT");
+
             if (param->disc_st_chg.state == ESP_BT_GAP_DISCOVERY_STOPPED) {
                 if (s_a2d_state == APP_AV_STATE_DISCOVERED) {
                     s_a2d_state = APP_AV_STATE_CONNECTING;
@@ -471,7 +511,12 @@ void BluetoothA2DPSource::bt_app_gap_callback(esp_bt_gap_cb_event_t event, esp_b
             break;
         }
         case ESP_BT_GAP_RMT_SRVCS_EVT:
+                ESP_LOGI(SPP_TAG, "ESP_BT_GAP_RMT_SRVCS_EVT");
+                break;
+
         case ESP_BT_GAP_RMT_SRVC_REC_EVT:
+            ESP_LOGI(SPP_TAG, "ESP_BT_GAP_RMT_SRVC_REC_EVT");
+
             break;
         case ESP_BT_GAP_AUTH_CMPL_EVT: {
             if (param->auth_cmpl.stat == ESP_BT_STATUS_SUCCESS) {
@@ -490,6 +535,11 @@ void BluetoothA2DPSource::bt_app_gap_callback(esp_bt_gap_cb_event_t event, esp_b
                 esp_bt_gap_pin_reply(param->pin_req.bda, true, 16, pin_code);
             } else {
                 ESP_LOGI(BT_AV_TAG, "Input pin code: 1234");
+                esp_bt_pin_code_t pin_code;
+                pin_code[0] = '1';
+                pin_code[1] = '2';
+                pin_code[2] = '3';
+                pin_code[3] = '4';
                 esp_bt_gap_pin_reply(param->pin_req.bda, true, pin_code_len, pin_code);
             }
             break;
@@ -527,13 +577,13 @@ void BluetoothA2DPSource::bt_av_hdl_stack_evt(uint16_t event, void *p_param)
     ESP_LOGD(BT_AV_TAG, "bt_av_hdl_stack_evt evt %d",  event);
     switch (event) {
         case BT_APP_EVT_STACK_UP: {
-            // set up device name 
+            // set up device name
             esp_bt_dev_set_device_name(dev_name);
 
-            // register GAP callback function 
+            // register GAP callback function
             esp_bt_gap_register_callback(ccall_bt_app_gap_callback);
 
-            // initialize AVRCP controller 
+            // initialize AVRCP controller
             esp_avrc_ct_init();
             esp_avrc_ct_register_callback(ccall_bt_app_rc_ct_cb);
 
@@ -555,17 +605,17 @@ void BluetoothA2DPSource::bt_av_hdl_stack_evt(uint16_t event, void *p_param)
                 esp_a2d_source_connect(last_connection);
                 s_a2d_state = APP_AV_STATE_CONNECTING;
             } else {
-            //  start device discovery 
+            //  start device discovery
                 ESP_LOGI(BT_AV_TAG, "Starting device discovery...");
                 s_a2d_state = APP_AV_STATE_DISCOVERING;
                 esp_bt_gap_start_discovery(ESP_BT_INQ_MODE_GENERAL_INQUIRY, 10, 0);
             }
 
-            // create and start heart beat timer 
+            // create and start heart beat timer
             int tmr_id = 0;
             s_tmr = xTimerCreate("connTmr", (10000 / portTICK_RATE_MS), pdTRUE, (void *)tmr_id, ccall_a2d_app_heart_beat);
             xTimerStart(s_tmr, portMAX_DELAY);
-            
+
             break;
         }
 
@@ -778,7 +828,7 @@ void BluetoothA2DPSource::bt_app_av_state_connected(uint16_t event, void *param)
                 ESP_LOGI(BT_AV_TAG, "a2dp dis_connected");
                 s_a2d_state = APP_AV_STATE_UNCONNECTED;
                 set_scan_mode_connectable(true);
-            } 
+            }
             break;
         }
         case ESP_A2D_AUDIO_STATE_EVT: {
@@ -939,14 +989,14 @@ int32_t BluetoothA2DPSource::get_data_default(uint8_t *data, int32_t len) {
         if (result_len<=0){
             if (sound_data->doLoop()){
                 ESP_LOGD(BT_APP_TAG, "%s - end of data: restarting", __func__);
-                sound_data_current_pos = 0;            
+                sound_data_current_pos = 0;
             } else {
                 ESP_LOGD(BT_APP_TAG, "%s - end of data: stopping", __func__);
                 hasSoundData = false;
             }
         }
     } else {
-        // return silence 
+        // return silence
         memset(data,0,len);
         result_len = len;
     }
@@ -963,7 +1013,158 @@ void BluetoothA2DPSource::set_reset_ble(bool doInit){
     reset_ble = doInit;
 }
 
+void BluetoothA2DPSource::bt_spp_cb(esp_spp_cb_event_t event, esp_spp_cb_param_t *param){
+    uint8_t i = 0;
+    char bda_str[18] = {0};
+    switch (event)
+    {
+    case ESP_SPP_INIT_EVT:
+        if (param->init.status == ESP_SPP_SUCCESS)
+        {
+            ESP_LOGI(SPP_TAG, "ESP_SPP_INIT_EVT");
+            esp_bt_dev_set_device_name(EXAMPLE_DEVICE_NAME);
+            esp_bt_gap_set_scan_mode(ESP_BT_CONNECTABLE, ESP_BT_GENERAL_DISCOVERABLE);
+            esp_bt_gap_start_discovery(inq_mode, inq_len, inq_num_rsps);
+        }
+        else
+        {
+            ESP_LOGE(SPP_TAG, "ESP_SPP_INIT_EVT status:%d", param->init.status);
+        }
+        break;
+    case ESP_SPP_DISCOVERY_COMP_EVT:
+        if (param->disc_comp.status == ESP_SPP_SUCCESS)
+        {
+            ESP_LOGI(SPP_TAG, "ESP_SPP_DISCOVERY_COMP_EVT scn_num:%d", param->disc_comp.scn_num);
+            for (i = 0; i < param->disc_comp.scn_num; i++)
+            {
+                ESP_LOGI(SPP_TAG, "-- [%d] scn:%d service_name:%s", i, param->disc_comp.scn[i],
+                         param->disc_comp.service_name[i]);
+            }
+            /* We only connect to the first found server on the remote SPP acceptor here */
+            esp_spp_connect(sec_mask, role_master, param->disc_comp.scn[0], peer_bd_addr);
+        }
+        else
+        {
+            ESP_LOGE(SPP_TAG, "ESP_SPP_DISCOVERY_COMP_EVT status=%d", param->disc_comp.status);
+        }
+        break;
+    case ESP_SPP_OPEN_EVT:
+        if (param->open.status == ESP_SPP_SUCCESS)
+        {
+            ESP_LOGI(SPP_TAG, "ESP_SPP_OPEN_EVT handle:%d rem_bda:[%s]", param->open.handle,
+                     bda2str(param->open.rem_bda, bda_str, sizeof(bda_str)));
+            /* Start to write the first data packet */
+            esp_spp_write(param->open.handle, SPP_DATA_LEN, spp_data);
+            s_p_data = spp_data;
+            gettimeofday(&time_old, NULL);
+        }
+        else
+        {
+            ESP_LOGE(SPP_TAG, "ESP_SPP_OPEN_EVT status:%d", param->open.status);
+        }
+        break;
+    case ESP_SPP_CLOSE_EVT:
+        ESP_LOGI(SPP_TAG, "ESP_SPP_CLOSE_EVT status:%d handle:%d close_by_remote:%d", param->close.status,
+                 param->close.handle, param->close.async);
+        break;
+    case ESP_SPP_START_EVT:
+        ESP_LOGI(SPP_TAG, "ESP_SPP_START_EVT");
+        break;
+    case ESP_SPP_CL_INIT_EVT:
+        if (param->cl_init.status == ESP_SPP_SUCCESS)
+        {
+            ESP_LOGI(SPP_TAG, "ESP_SPP_CL_INIT_EVT handle:%d sec_id:%d", param->cl_init.handle, param->cl_init.sec_id);
+        }
+        else
+        {
+            ESP_LOGE(SPP_TAG, "ESP_SPP_CL_INIT_EVT status:%d", param->cl_init.status);
+        }
+        break;
+    case ESP_SPP_DATA_IND_EVT:
+        ESP_LOGI(SPP_TAG, "ESP_SPP_DATA_IND_EVT");
+        break;
+    case ESP_SPP_WRITE_EVT:
+        if (param->write.status == ESP_SPP_SUCCESS)
+        {
+            if (s_p_data + param->write.len == spp_data + SPP_DATA_LEN)
+            {
+                /* Means the previous data packet be sent completely, send a new data packet */
+                s_p_data = spp_data;
+            }
+            else
+            {
+                /*
+                 * Means the previous data packet only be sent partially due to the lower layer congestion, resend the
+                 * remainning data.
+                 */
+                s_p_data += param->write.len;
+            }
+#if (SPP_SHOW_MODE == SPP_SHOW_DATA)
+            /*
+             * We only show the data in which the data length is less than 128 here. If you want to print the data and
+             * the data rate is high, it is strongly recommended to process them in other lower priority application task
+             * rather than in this callback directly. Since the printing takes too much time, it may stuck the Bluetooth
+             * stack and also have a effect on the throughput!
+             */
+            ESP_LOGI(SPP_TAG, "ESP_SPP_WRITE_EVT len:%d handle:%d cong:%d", param->write.len, param->write.handle,
+                     param->write.cong);
+            if (param->write.len < 128)
+            {
+                esp_log_buffer_hex("", spp_data, param->write.len);
+                /* Delay a little to avoid the task watch dog */
+                vTaskDelay(pdMS_TO_TICKS(10));
+            }
+#else
+            gettimeofday(&time_new, NULL);
+            data_num += param->write.len;
+            if (time_new.tv_sec - time_old.tv_sec >= 3)
+            {
+                print_speed();
+            }
+#endif
+        }
+        else
+        {
+            /* Means the prevous data packet is not sent at all, need to send the whole data packet again. */
+            ESP_LOGE(SPP_TAG, "ESP_SPP_WRITE_EVT status:%d", param->write.status);
+        }
 
+        if (!param->write.cong)
+        {
+            /* The lower layer is not congested, you can send the next data packet now. */
+            esp_spp_write(param->write.handle, spp_data + SPP_DATA_LEN - s_p_data, s_p_data);
+        }
+        else
+        {
+            /*
+             * The lower layer is congested now, don't send the next data packet until receiving the
+             * ESP_SPP_CONG_EVT with param->cong.cong == 0.
+             */
+            ;
+        }
 
-
-
+        /*
+         * If you don't want to manage this complicated process, we also provide the SPP VFS mode that hides the
+         * implementation details. However, it is less efficient and will block the caller until all data has been sent.
+         */
+        break;
+    case ESP_SPP_CONG_EVT:
+#if (SPP_SHOW_MODE == SPP_SHOW_DATA)
+        ESP_LOGI(SPP_TAG, "ESP_SPP_CONG_EVT cong:%d", param->cong.cong);
+#endif
+        if (param->cong.cong == 0)
+        {
+            /* Send the privous (partial) data packet or the next data packet. */
+            esp_spp_write(param->write.handle, spp_data + SPP_DATA_LEN - s_p_data, s_p_data);
+        }
+        break;
+    case ESP_SPP_SRV_OPEN_EVT:
+        ESP_LOGI(SPP_TAG, "ESP_SPP_SRV_OPEN_EVT");
+        break;
+    case ESP_SPP_UNINIT_EVT:
+        ESP_LOGI(SPP_TAG, "ESP_SPP_UNINIT_EVT");
+        break;
+    default:
+        break;
+    }
+}
